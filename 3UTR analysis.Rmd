@@ -1,0 +1,435 @@
+---
+title: "3UTR analysis for NGCs"
+author: "Huayu"
+date: "May 2, 2018"
+output: pdf_document
+---
+
+#Human genome annotation data (Ensembl)
+
+```{r}
+source("https://bioconductor.org/biocLite.R")
+biocLite()
+
+#if (!require("ensembldb")) biocLite("ensembldb")
+#if (!require("GenomicFeatures")) biocLite("GenomicFeatures")
+
+if (!require("EnsDb.Hsapiens.v75")) biocLite("EnsDb.Hsapiens.v75")
+if (!require("AnnotationHub")) biocLite("AnnotationHub")
+if (!require("GEOquery")) biocLite("GEOquery")
+
+if (!require("Gviz")) biocLite("Gviz")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("svglite")) install.packages("svglite")
+
+
+
+#library(ensembldb)
+#library(GenomicFeatures)
+
+library(EnsDb.Hsapiens.v75)
+library(AnnotationHub)
+library(GEOquery)
+
+library(Gviz) 
+library(ggplot2)
+
+```
+
+```{r}
+ensdb <- EnsDb.Hsapiens.v75
+ensdb
+columns(ensdb)
+```
+
+#Get 3'UTR annotations
+
+```{r}
+hg3UTR <- threeUTRsByTranscript(ensdb)
+hgGene <- genes(ensdb)
+head(hg3UTR)
+head(hgGene)
+```
+
+#Get exon infos of all NGCs
+
+```{r}
+load("NGCCors.Rdata")
+ngcExonDb <- select(x = ensdb, keys = NGCCors$SYMBOL, columns = c("ENTREZID","GENEID", "TXID", "EXONID", "EXONIDX", "SYMBOL"), keytype = "SYMBOL")
+head(ngcExonDb)
+```
+
+#Extract from all 3'UTRs, ones for NGCs
+```{r}
+ngc3UTR <- hg3UTR[names(hg3UTR) %in% unique(ngcExonDb$TXID)]
+ngc3UTRUl <- unlist(ngc3UTR)
+head(ngc3UTR)
+head(ngc3UTRUl)
+```
+
+#Match genenames to 3'UTR exons in NGC
+
+```{r}
+head(values(ngc3UTRUl)$exon_id)
+
+ngcSYMEXO <- unique(ngcExonDb[,c("SYMBOL", "EXONID")])
+
+head(ngcSYMEXO)
+
+ngc3UTRUl$SYMBOL <- ngcSYMEXO$SYMBOL[match(values(ngc3UTRUl)$exon_id, ngcSYMEXO$EXONID)]
+
+head(ngc3UTRUl)
+```
+
+
+#Search for ACUAA in 3'UTRs of NGCs
+
+##Get sequence of 3'UTRs
+```{r}
+Dna <- getGenomeFaFile(ensdb)
+ngc3UTRSeq <- getSeq(Dna, ngc3UTRUl)
+head(ngc3UTRSeq)
+```
+
+
+```{r}
+
+ngc3UTRUl$Count_ACTAA <- vcountPattern(pattern = "ACTAA", subject = ngc3UTRSeq)
+ngc3UTR_ACTAA <- vmatchPattern(pattern = "ACTAA", subject = ngc3UTRSeq)
+
+ngc3UTR_ACTAA@NAMES <- values(ngc3UTRUl)$SYMBOL
+
+QKIMotif <- DNAStringSet(
+                      x = paste("ACTAAY",
+                      sapply(X = 1:20, FUN = function(x, string) paste(rep(string, times = x), collapse = ""), string = "N"),
+                      "TAAY", 
+                      sep = ""
+                      ))
+
+ngc3UTRUl$Count_QKIMotif <- apply(
+                      X = sapply(X = QKIMotif, FUN = vcountPattern, subject = ngc3UTRSeq), 
+                      MARGIN = 1, 
+                      FUN = sum)
+
+
+head(ngc3UTRUl)
+head(ngc3UTR_ACTAA)
+```
+
+#Is fold change correlated with number of ACUAAs in 3'UTR
+
+```{r}
+load("QKINGCSummary.Rdata")
+
+no_Overlap <- function(values, minDist)
+{
+  n <- length(values)
+  
+  delta <- c(values[1], values[2:n] - values[1:(n-1)])
+  
+  delta[delta < minDist] <- minDist
+  
+  altValue <- cumsum(delta)
+  
+  altValue <- altValue + median(values) - median(altValue)
+  
+  altValue
+}
+
+
+
+
+ngc3UTRUl$logFC <- SummaryList$logFC$humanMPData_Array[match(ngc3UTRUl$SYMBOL, SummaryList$logFC$SYMBOL)]
+
+ngc3UTRUlDf <- as.data.frame(ngc3UTRUl[!duplicated(names(ngc3UTRUl))])
+
+ngc3UTRUlDf <- ngc3UTRUlDf[ngc3UTRUlDf$SYMBOL != "QKI",]
+
+ngc3UTRUlDf <- ngc3UTRUlDf[!is.na(ngc3UTRUlDf$logFC),]
+ngc3UTRUlDf <- ngc3UTRUlDf[!duplicated(ngc3UTRUlDf$SYMBOL),]
+ngc3UTRUlDf <- ngc3UTRUlDf[order(ngc3UTRUlDf$logFC),]
+
+
+
+
+ngc3UTRUlDf$text_y <- ngc3UTRUlDf$logFC
+for (i in 0:4)
+{
+  ngc3UTRUlDf$text_y[ngc3UTRUlDf$Count_ACTAA == i] <- no_Overlap(ngc3UTRUlDf$text_y[ngc3UTRUlDf$Count_ACTAA == i], minDist = 0.35)
+}
+
+
+ngc3UTRUlDf$text_x <- ngc3UTRUlDf$Count_ACTAA + 0.2
+
+
+
+ggplot(data = ngc3UTRUlDf) +
+  geom_point(aes(x = Count_ACTAA, y = logFC)) +
+  geom_text(aes(x = text_x, y = text_y , label = SYMBOL), hjust = -0.1) +
+  geom_segment(aes(x = Count_ACTAA, y = logFC, xend = text_x, yend = text_y)) +
+  scale_x_continuous(expand = expand_scale(mult = 0.05, add = c(0.5, 1))) +
+  scale_y_continuous(expand = c(0.05, 0.5)) +
+  xlab("Counts of ACUAA in 3'UTR") +
+  ylab("log2 Fold Change Pat/Sib\nMonocyte") +
+  labs(title = "Monocyte") +
+  theme_bw() +
+  theme(
+    panel.border = element_rect(size = 1)
+  )
+
+
+ggsave(filename = "ACTAAvsFC_monocyte.svg", device = "svg", width = 6, height = 5)
+
+```
+
+
+In macrophages
+```{r}
+ngc3UTRUl$logFC <- SummaryList$logFC$humanMaPData_Array[match(ngc3UTRUl$SYMBOL, SummaryList$logFC$SYMBOL)]
+
+ngc3UTRUlDf <- as.data.frame(ngc3UTRUl[!duplicated(names(ngc3UTRUl))])
+
+ngc3UTRUlDf <- ngc3UTRUlDf[ngc3UTRUlDf$SYMBOL != "QKI",]
+
+ngc3UTRUlDf <- ngc3UTRUlDf[!is.na(ngc3UTRUlDf$logFC),]
+ngc3UTRUlDf <- ngc3UTRUlDf[!duplicated(ngc3UTRUlDf$SYMBOL),]
+ngc3UTRUlDf <- ngc3UTRUlDf[order(ngc3UTRUlDf$logFC),]
+
+
+
+
+ngc3UTRUlDf$text_y <- ngc3UTRUlDf$logFC
+for (i in 0:4)
+{
+  ngc3UTRUlDf$text_y[ngc3UTRUlDf$Count_ACTAA == i] <- no_Overlap(ngc3UTRUlDf$text_y[ngc3UTRUlDf$Count_ACTAA == i], minDist = 0.35)
+}
+
+
+ngc3UTRUlDf$text_x <- ngc3UTRUlDf$Count_ACTAA + 0.2
+
+
+
+ggplot(data = ngc3UTRUlDf) +
+  geom_point(aes(x = Count_ACTAA, y = logFC)) +
+  geom_text(aes(x = text_x, y = text_y , label = SYMBOL), hjust = -0.1) +
+  geom_segment(aes(x = Count_ACTAA, y = logFC, xend = text_x, yend = text_y)) +
+  scale_x_continuous(expand = expand_scale(mult = 0.05, add = c(0.5, 1))) +
+  scale_y_continuous(expand = c(0.05, 0.5)) +
+  xlab("Counts of ACUAA in 3'UTR") +
+  ylab("log2 Fold Change Pat/Sib\nMacrophage") +
+  labs(title = "Macrophage") +
+  theme_bw() +
+  theme(
+    panel.border = element_rect(size = 1)
+  )
+
+
+ggsave(filename = "ACTAAvsFC_Macrophage.svg", device = "svg", width = 6, height = 5)
+
+
+
+
+```
+
+
+
+
+#Overlapping with microRNA binding site
+
+##Convert QkiMirNgc dataframe to Granges objects
+```{r}
+load(file = "mirDbNGCs.rData")
+QkiMirNgc <- mirDbNGCs
+
+makeStartEndfromGenoCoord <- function(genome_coordinates)
+  {
+    mat1 <- do.call(rbind, strsplit(x = genome_coordinates, split = "\\[|:|\\]"))
+    mat2 <- do.call(rbind, strsplit(x = mat1[,4], split = "\\-|\\,"))
+    mat <- cbind(mat1, mat2[,1:2])
+    mat <- as.data.frame(mat[,c(3, 6, 7, 5)])
+    colnames(mat) <- c("seqnames", "start", "end", "strand")
+    mat
+  }
+
+
+FromGenoCoordtoGranges <- function(df, coord.var)
+{
+  grangeMat <- makeStartEndfromGenoCoord(df[,coord.var])
+  df <- cbind(df,grangeMat)
+  gr <- makeGRangesFromDataFrame(df, seqnames.field = "seqnames", start.field = "start", end.field = "end", strand.field = "strand")
+  values(gr) <- subset(df, select = -c(seqnames, start, end, strand))
+  gr
+}
+
+QkiMirNgcGr <- FromGenoCoordtoGranges(df = QkiMirNgc, coord.var = "genome_coordinates")
+seqlevels(QkiMirNgcGr) <- c(1:22, "X")
+head(QkiMirNgcGr)
+```
+
+##Find the exact possion of ACUAAs
+
+```{r}
+
+makeExactPosition <- function(irMatch, grInfo)
+{
+  if (length(irMatch) != 0)
+  {
+    if (as.character(strand(grInfo)) == "-")
+    {
+      irMatch <- IRanges(start = width(grInfo) - end(irMatch) + 1,
+                         end =  width(grInfo) - start(irMatch) + 1,
+                         width = width(irMatch))
+    }
+    n <- length(irMatch)
+    gr <- GRanges(
+      seqnames = Rle(rep(as.character(seqnames(grInfo)), n)),
+      ranges = shift(irMatch, start(grInfo) - 1),
+      strand = Rle(rep(as.character(strand(grInfo)), n))
+    )
+    values(gr) <- as.data.frame(rep(grInfo, n), row.names = 1:n)
+    names(values(gr))[1:5] <- paste("UTR_", names(values(gr))[1:5], sep = "") 
+    return(gr)
+  }
+  return(NA)
+}
+
+ngc3UTR_ACTAA_ectPos <- list()
+
+for (i in 1:534)
+  ngc3UTR_ACTAA_ectPos[[i]] <- makeExactPosition(irMatch = ngc3UTR_ACTAA[[i]], grInfo = ngc3UTRUl[i,])
+
+head(ngc3UTR_ACTAA_ectPos)
+```
+
+#Is the positions overlapping with the postion of miRNA binding?
+##Flatten the ACTAA postions in a GRange
+
+```{r}
+ngc3UTR_ACTAA_ectPosUl <- unlist(GRangesList(ngc3UTR_ACTAA_ectPos[!is.na(ngc3UTR_ACTAA_ectPos)]))
+
+ngc3UTR_ACTAA_ectPosUl <- ngc3UTR_ACTAA_ectPosUl[seqnames(ngc3UTR_ACTAA_ectPosUl) %in% c(1:22, "X")]
+
+seqlevels(ngc3UTR_ACTAA_ectPosUl) <- c(1:22, "X")
+
+head(ngc3UTR_ACTAA_ectPosUl)
+head(ngc3UTR_ACTAA_ectPosUl + 20)
+```
+
+##For every NGC in the list, find the overlap of extended QRE region and miR binding range
+
+```{r}
+QREMirOverlap <- list()
+QREMirOverlap <- findOverlaps(QkiMirNgcGr, ngc3UTR_ACTAA_ectPosUl + 20)
+
+
+
+QREMirOverlapDF <- cbind(miR = as.data.frame(QkiMirNgcGr[from(QREMirOverlap)], row.names = c(1:length(QREMirOverlap))), QRE = as.data.frame(ngc3UTR_ACTAA_ectPosUl[to(QREMirOverlap)], row.names = c(1:length(QREMirOverlap))))
+
+write.table(x = QREMirOverlapDF, file = "QREMirOverlapDF.txt", sep = "\t", row.names = FALSE)
+
+```
+
+
+
+
+#Filtering the results
+
+##Filter by miR expression in monocyte
+```{r}
+
+GSE52986 <- getGEO(GEO = "GSE52986")[[1]]
+phenoData(GSE52986)@data
+exprsGSE <- data.frame(exprs(GSE52986)[,c(1,3,5,7)])
+exprsGSE$mean <- apply(exprsGSE[, 1:4], 1, mean)
+exprsGSE$log2Mean <- log2(exprsGSE$mean)
+hist(exprsGSE$log2Mean)
+
+exprsGSE$probe <- row.names(exprsGSE)
+ftrGSE <- featureData(GSE52986)@data[, c("ID", "Search_Key")]
+
+exprsGSE <- merge(x = exprsGSE[, 1:7], y = ftrGSE, by.x = "probe", by.y = "ID", all.x = TRUE)
+
+#List of microRNA that has 
+monoMir <- exprsGSE$Search_Key[exprsGSE$log2Mean > quantile(exprsGSE$log2Mean, 0.8)]
+
+sum(QREMirOverlapDF$miR.mirna_name %in% monoMir)
+```
+
+##Filter by miR-gene interaction strength (miRsvr score)
+
+```{r}
+sum(QREMirOverlapDF$miR.mirsvr_score < -1)
+```
+
+#Filter by NGC expression (in RNASeq)
+
+```{r}
+sum(QREMirOverlapDF$miR.gene_symbol %in% x)
+```
+
+
+```{r, fig.width= 5, fig.height=5}
+
+sum(QREMirOverlapDF$miR.mirna_name %in% monoMir & QREMirOverlapDF$miR.mirsvr_score < -1 & QREMirOverlapDF$miR.gene_symbol %in% x)
+
+QREMirOverlapDFSl <- QREMirOverlapDF[QREMirOverlapDF$miR.mirna_name %in% monoMir & QREMirOverlapDF$miR.mirsvr_score < -1 & QREMirOverlapDF$miR.gene_symbol %in% x, ]
+
+QREMirOverlapDFSl <- QREMirOverlapDFSl[!duplicated(QREMirOverlapDFSl$miR.mirna_name),]
+
+exprsSelected <- exprsGSE[exprsGSE$Search_Key %in% QREMirOverlapDFSl$miR.mirna_name, c("log2Mean", "Search_Key")]
+
+QREMirOverlapDFSl <- merge(QREMirOverlapDFSl, exprsSelected, by.x = "miR.mirna_name", by.y = "Search_Key")
+
+write.table(x = QREMirOverlapDFSl, file = "QREMirOverlapDFSl.txt", sep = "\t", row.names = FALSE)
+
+table(QREMirOverlapDFSl$QRE.SYMBOL)
+QREMirOverlapDFSlTable <- as.data.frame(table(QREMirOverlapDFSl$QRE.SYMBOL))
+QREMirOverlapDFSlTable <- QREMirOverlapDFSlTable[order(QREMirOverlapDFSlTable$Freq, decreasing = T),]
+QREMirOverlapDFSlTable$Var1 <- factor(QREMirOverlapDFSlTable$Var1, levels = QREMirOverlapDFSlTable$Var1 )
+
+library(ggplot2)
+ggplot(data = QREMirOverlapDFSlTable[order(QREMirOverlapDFSlTable$Freq, decreasing = T),], mapping = aes(x = Var1, y = Freq)) +
+  geom_bar(stat = "identity") +
+  xlab("") +
+  ylab("Number of QRE-MIRTarget Proximity") +
+  theme_bw()
+  
+```
+
+
+
+
+##Visulization of the overlapping
+
+```{r}
+i = "SEMA7A"
+  #Reduce to a certain gene
+  pairs <- QREMirOverlapDFSl[QREMirOverlapDFSl$QRE.SYMBOL == i,]
+
+  
+  miRGr <- makeGRangesFromDataFrame(df = pairs, seqnames.field = "miR.seqnames", start.field = "miR.start", end.field = "miR.end", strand.field = "miR.strand", keep.extra.columns = TRUE)
+  seqlevels(miRGr) <- paste("Chr", seqlevels(miRGr), sep = "") 
+  
+  QREGr <- ngc3UTR_ACTAA_ectPosUl[ngc3UTR_ACTAA_ectPosUl$SYMBOL == i,]
+  seqlevels(QREGr) <- paste("Chr", seqlevels(QREGr), sep = "") 
+  
+  miRTrack <- AnnotationTrack(miRGr, name = "microRNA Binding", id = values(miRGr)$miR.mirna_name)
+  QRETrack <- AnnotationTrack(QREGr[1:2], name = "QRE", id = "ACUAA")
+
+  biomTrack <- BiomartGeneRegionTrack(genome = "hg19", symbol = i, transcriptAnnotation = "symbol", name = "ENSEMBL")
+  iTrack <- IdeogramTrack(genome = "hg19", chromosome = as.character(seqnames(miRGr))[1])
+  gTrack <- GenomeAxisTrack(name = as.character(seqnames(miRGr))[1])
+  
+  svg(paste(i, "_miRQRE.svg", sep = ""), width = 6, height = 4.5)
+  plotTracks(list(iTrack, gTrack, miRTrack, QRETrack, biomTrack), groupAnnotation = "id", just.group = "right")
+  dev.off()
+
+
+
+ svg(paste(i, "_miRQRE_zoomedin.svg", sep = ""), width = 6, height = 4.5)
+  plotTracks(list(iTrack, gTrack, miRTrack, QRETrack, biomTrack), from = , groupAnnotation = "id", just.group = "left")
+  dev.off()
+
+save(miRTrack, QRETrack, file = "SEMA7A_tracks.rdata")
+
+```
